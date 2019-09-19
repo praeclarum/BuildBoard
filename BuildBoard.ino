@@ -69,6 +69,8 @@ inline uint16_t rgb(uint8_t r, uint8_t g, uint8_t b)
 }
 
 void setClock() {
+  displayStatus("Clock");
+  
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   Serial.print(F("Waiting for NTP time sync: "));
   time_t nowSecs = time(nullptr);
@@ -127,29 +129,43 @@ void displayStatus(const String &message)
 
 void getApps()
 {
-  auto json = get("/users/" BITRISE_USER "/apps?sort_by=last_build_at&limit=50");
+  displayStatus("Apps");
+
+  String basePath = "/users/" BITRISE_USER "/apps?sort_by=last_build_at&limit=10";
+  String nextPath = basePath;
+  
 //  Serial.println(json);
 
   DynamicJsonDocument doc(10000);
-  DeserializationError error = deserializeJson(doc, json);
-  if (error) {
-    Serial.print(F("getApps deserializeJson() failed: "));
-    Serial.println(error.c_str());
-    return;
-  }
-  
+
   apps.clear ();
-  const char *title = doc["data"][0]["title"];
-  auto i = 0;
-  while (title) {
-    App app;
-    app.title = title;
-    app.slug = (const char *)doc["data"][i]["slug"];
-    apps.push_back(app);
-    Serial.printf("%s = %s\n", app.title.c_str(), app.slug.c_str());
+  
+  while (nextPath.length() > 0) {
+    Serial.printf("Reading %s...\n", nextPath.c_str());
+    auto json = get(nextPath);
+    DeserializationError error = deserializeJson(doc, json);
+    if (error) {
+      Serial.print(F("getApps deserializeJson() failed: "));
+      Serial.println(error.c_str());
+      return;
+    }
     
-    i++;
-    title = doc["data"][i]["title"];
+    const char *title = doc["data"][0]["title"];
+    auto i = 0;
+    while (title) {
+      App app;
+      app.title = title;
+      app.slug = (const char *)doc["data"][i]["slug"];
+      apps.push_back(app);
+      Serial.printf("%s = %s\n", app.title.c_str(), app.slug.c_str());
+      
+      i++;
+      title = doc["data"][i]["title"];
+    }
+    nextPath = (const char*)doc["paging"]["next"];
+    if (nextPath.length() > 0) {
+      nextPath = basePath + "&next=" + nextPath;
+    }
   }
 }
 
@@ -216,6 +232,40 @@ void scaleBackground()
   backgroundCanvasScaled.endWrite();
 }
 
+void drawProgressBar(GFXcanvas16 *g)
+{
+  int numApps = 0;
+  int numGoodApps = 0;
+  for (const auto &a : apps) {
+    if (a.buildStatus == 1)
+      numGoodApps++;
+    if (a.buildStatus >= 1)
+      numApps++;
+  }
+  if (numApps > 0) {
+    float gr = (float)numGoodApps/(float)numApps;
+    int w = (int)(gr * MATRIX_WIDTH + 0.5f);
+    g->fillRect(0, MATRIX_HEIGHT - 1, w,              1, rgb( 0, 32, 0));
+    g->fillRect(w, MATRIX_HEIGHT - 1, MATRIX_WIDTH-w, 1, rgb(32,  0, 0));
+  }
+}
+
+void drawAppScreen(App &app, const String &message, uint16_t color, int x, GFXcanvas16 *g)
+{
+//  if (app.buildStatus == 1)
+//    g->fillScreen(rgb(0, 24, 0));
+//  else
+//    g->fillScreen(rgb(32, 0, 0));
+//  g->fillScreen(rgb(32, 32, 32));
+  g->fillScreen(rgb(0, 0, 0));
+    
+  drawProgressBar(g);
+  
+  g->setTextColor(color);
+  g->setCursor(x,0);
+  g->print(message);
+}
+
 void displayApp(App &app)
 {
   String message = app.title + " " + app.buildStatusText;
@@ -227,10 +277,10 @@ void displayApp(App &app)
   g->setTextSize(1);
   g->setRotation(0);
 
-  g->fillRect(           0,             0, MATRIX_WIDTH, MATRIX_HEIGHT, rgb(128, 128,   0));
-  g->fillRect(           0, MATRIX_HEIGHT, MATRIX_WIDTH, MATRIX_HEIGHT, rgb(128, 128, 128));
-  g->fillRect(MATRIX_WIDTH,             0, MATRIX_WIDTH, MATRIX_HEIGHT, rgb(  0, 128, 128));
-  g->fillRect(MATRIX_WIDTH, MATRIX_HEIGHT, MATRIX_WIDTH, MATRIX_HEIGHT, rgb(128,   0, 128));
+//  g->fillRect(           0,             0, MATRIX_WIDTH, MATRIX_HEIGHT, rgb(128, 128,   0));
+//  g->fillRect(           0, MATRIX_HEIGHT, MATRIX_WIDTH, MATRIX_HEIGHT, rgb(128, 128, 128));
+//  g->fillRect(MATRIX_WIDTH,             0, MATRIX_WIDTH, MATRIX_HEIGHT, rgb(  0, 128, 128));
+//  g->fillRect(MATRIX_WIDTH, MATRIX_HEIGHT, MATRIX_WIDTH, MATRIX_HEIGHT, rgb(128,   0, 128));
 
   uint16_t color = 0;
   if (app.buildStatus == 1) {
@@ -254,10 +304,7 @@ void displayApp(App &app)
   }
   int width = (int)(message.length() * 6);
   for (int x=MATRIX_WIDTH; x>=-(width - MATRIX_WIDTH) && isOn; x--) {
-    g->fillScreen(0);
-    g->setTextColor(color);
-    g->setCursor(x,0);
-    g->print(message);
+    drawAppScreen(app, message, color, x, g);
 
     scaleBackground();
     matrix.drawRGBBitmap(0, 0, backgroundCanvasScaled.getBuffer(), backgroundCanvasScaled.width(), backgroundCanvasScaled.height());
@@ -274,22 +321,24 @@ void displayApp(App &app)
 
 void setupAlexa()
 {
-    fauxmo.createServer(true); // not needed, this is the default value
-    fauxmo.setPort(80); // This is required for gen3 devices
-    fauxmo.enable(true);
-    fauxmo.addDevice(ALEXA_ID);
-    fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
-      Serial.printf("[ALEXA] Device #%d (%s) state: %s value: %d\n", device_id, device_name, state ? "ON" : "OFF", value);
-      if (strcmp(device_name, ALEXA_ID)==0) {
-        brightness = (value * MAX_BRIGHTNESS) / 256;
-        isOn = state;
-        if (isOn && brightness < MIN_BRIGHTNESS) {
-          brightness = MIN_BRIGHTNESS;
-        }
-        Serial.printf("IsOn = %d, Brightness = %d", isOn?1:0, brightness);
+  displayStatus("Alexa");
+
+  fauxmo.createServer(true); // not needed, this is the default value
+  fauxmo.setPort(80); // This is required for gen3 devices
+  fauxmo.enable(true);
+  fauxmo.addDevice(ALEXA_ID);
+  fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
+    Serial.printf("[ALEXA] Device #%d (%s) state: %s value: %d\n", device_id, device_name, state ? "ON" : "OFF", value);
+    if (strcmp(device_name, ALEXA_ID)==0) {
+      brightness = (value * MAX_BRIGHTNESS) / 256;
+      isOn = state;
+      if (isOn && brightness < MIN_BRIGHTNESS) {
+        brightness = MIN_BRIGHTNESS;
       }
-    });
-    fauxmo.setState(ALEXA_ID, true, (255 * brightness) / MAX_BRIGHTNESS);
+      Serial.printf("IsOn = %d, Brightness = %d", isOn?1:0, brightness);
+    }
+  });
+  fauxmo.setState(ALEXA_ID, true, (255 * brightness) / MAX_BRIGHTNESS);
 }
 
 #if CONFIG_FREERTOS_UNICORE
@@ -298,10 +347,9 @@ void setupAlexa()
 #define ARDUINO_RUNNING_CORE 1
 #endif
 
-void setup() {
-//  esp_log_level_set("*", ESP_LOG_DEBUG);
+void setup()
+{
   Serial.begin(115200);
-//  Serial.setDebugOutput(true);
 
   FastLED.addLeds<NEOPIXEL,MATRIX_PIN>(matrixleds, NUMMATRIX); 
   matrix.begin();
@@ -310,30 +358,21 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFiMulti.addAP(WIFI_SSID, WIFI_PASS);
 
-  // wait for WiFi connection
   Serial.print("Waiting for WiFi to connect...");
   while ((WiFiMulti.run() != WL_CONNECTED)) {
     Serial.print(".");
   }
   Serial.println(" connected");
 
-  displayStatus("Clock");
-  
   setClock();
-
-  displayStatus("Alexa");
 
   setupAlexa();
 
-  displayStatus("Xfer");
-
-//  Scheduler.startLoop(loopBackground);
   xTaskCreatePinnedToCore(loopBackground, "loopBackground", 4096, NULL, 1, NULL, ARDUINO_RUNNING_CORE);
 }
 
 void loopBackground(void *)
 {
-//  Serial.println("\n\n\n\n\nFAUXMOOOOO\n\n\n\n\n");
   for (;;) {
     fauxmo.handle();
   }
@@ -350,8 +389,12 @@ void loop()
     lastUpdateMillis = millis();
   }
   
-  if (needsUpdate)
+  if (needsUpdate) {
     getApps();
+  }
+  if (apps.size() == 0) {
+    displayStatus("None");
+  }
   for (size_t i = 0; isOn && i < apps.size(); i++) {
     if (needsUpdate || apps[i].buildStatusText.length() == 0) {
       updateApp(apps[i]);
