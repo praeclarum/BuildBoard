@@ -113,14 +113,15 @@ String get(const String &path)
 
 void displayStatus(const String &message)
 {
-//  matrix.clear();
   matrix.setTextWrap(false);  // we don't wrap text so it scrolls nicely
   matrix.setTextSize(1);
   matrix.setRotation(0);
 
   uint16_t color = rgb(128, 128, 128);
-//  matrix.setScale();
   matrix.clear();
+
+  drawProgressBar(&matrix);
+  
   matrix.setTextColor(color);
   matrix.setCursor(0,0);
   matrix.print(message);
@@ -138,8 +139,6 @@ void getApps()
 
   DynamicJsonDocument doc(10000);
 
-  apps.clear ();
-  
   while (nextPath.length() > 0) {
     Serial.printf("Reading %s...\n", nextPath.c_str());
     auto json = get(nextPath);
@@ -156,7 +155,17 @@ void getApps()
       App app;
       app.title = title;
       app.slug = (const char *)doc["data"][i]["slug"];
-      apps.push_back(app);
+
+      bool needsAdd = true;
+      for (const auto &a : apps) {
+        if (a.title == app.title) {
+          needsAdd = false;
+          break;
+        }
+      }
+      if (needsAdd) {
+        apps.push_back(app);
+      }
       Serial.printf("%s = %s\n", app.title.c_str(), app.slug.c_str());
       
       i++;
@@ -232,7 +241,7 @@ void scaleBackground()
   backgroundCanvasScaled.endWrite();
 }
 
-void drawProgressBar(GFXcanvas16 *g)
+void drawProgressBar(Adafruit_GFX *g)
 {
   int numApps = 0;
   int numGoodApps = 0;
@@ -245,8 +254,8 @@ void drawProgressBar(GFXcanvas16 *g)
   if (numApps > 0) {
     float gr = (float)numGoodApps/(float)numApps;
     int w = (int)(gr * MATRIX_WIDTH + 0.5f);
-    g->fillRect(0, MATRIX_HEIGHT - 1, w,              1, rgb( 0, 32, 0));
     g->fillRect(w, MATRIX_HEIGHT - 1, MATRIX_WIDTH-w, 1, rgb(32,  0, 0));
+    g->fillRect(0, MATRIX_HEIGHT - 1, w,              1, rgb( 0, 32, 0));
   }
 }
 
@@ -330,7 +339,7 @@ void setupAlexa()
   fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
     Serial.printf("[ALEXA] Device #%d (%s) state: %s value: %d\n", device_id, device_name, state ? "ON" : "OFF", value);
     if (strcmp(device_name, ALEXA_ID)==0) {
-      brightness = (value * MAX_BRIGHTNESS) / 256;
+      brightness = (int)(((float)value * MAX_BRIGHTNESS) / 255.0f + 0.5f);
       isOn = state;
       if (isOn && brightness < MIN_BRIGHTNESS) {
         brightness = MIN_BRIGHTNESS;
@@ -395,14 +404,17 @@ void loop()
   if (apps.size() == 0) {
     displayStatus("None");
   }
-  for (size_t i = 0; isOn && i < apps.size(); i++) {
-    if (needsUpdate || apps[i].buildStatusText.length() == 0) {
-      updateApp(apps[i]);
+  else {
+    for (size_t i = 0; isOn && i < apps.size(); i++) {
+      if (needsUpdate || apps[i].buildStatusText.length() == 0) {
+        updateApp(apps[i]);
+      }
+      else {
+        delay(1000);
+      }
+      if (isOn) {
+        displayApp(apps[i]);
+      }
     }
-    else {
-      delay(1000);
-    }
-    if (isOn)
-      displayApp(apps[i]);
   }
 }
